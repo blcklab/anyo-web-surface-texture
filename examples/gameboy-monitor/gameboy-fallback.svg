@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="576" viewBox="0 0 160 144" shape-rendering="crispEdges">
+  <rect width="160" height="144" fill="#26332b"/>
+  <rect x="8" y="8" width="144" height="128" rx="5" fill="#9bbc0f"/>
+  <rect x="16" y="18" width="128" height="88" fill="#306230"/>
+  <text x="80" y="58" text-anchor="middle" font-family="monospace" font-size="10" font-weight="700" fill="#9bbc0f">ANYO WS4</text>
+  <text x="80" y="76" text-anchor="middle" font-family="monospace" font-size="7" fill="#8bac0f">SNAPSHOT FALLBACK</text>
+  <circle cx="55" cy="120" r="7" fill="#0f380f"/>
+  <circle cx="105" cy="116" r="5" fill="#0f380f"/>
+  <circle cx="119" cy="124" r="5" fill="#0f380f"/>
+</svg>

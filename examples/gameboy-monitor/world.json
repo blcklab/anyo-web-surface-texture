@@ -1,0 +1,130 @@
+{
+  "$schema": "../../node_modules/@blcklab/anyo/schemas/world-0.6.schema.json",
+  "version": "0.6",
+  "metadata": {
+    "title": "WS7 interactive Game Boy monitor texture proof"
+  },
+  "assets": {
+    "monitor": {
+      "type": "model",
+      "format": "glb",
+      "src": "./monitor.glb"
+    }
+  },
+  "prefabs": {
+    "gameboy-monitor": {
+      "type": "group",
+      "children": [
+        {
+          "id": "body",
+          "type": "model",
+          "asset": "monitor",
+          "components": [
+            {
+              "type": "anyo.surface-host",
+              "slots": {
+                "screen": {
+                  "mesh": "DisplayPanel",
+                  "materialSlot": 0,
+                  "uvSet": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": "screen",
+          "type": "web-surface",
+          "position": [
+            0,
+            1.35,
+            0.03
+          ],
+          "size": [
+            1.6,
+            1.44
+          ],
+          "webSurface": {
+            "source": {
+              "type": "app",
+              "app": "gameboy-emulator"
+            },
+            "target": {
+              "type": "entity-slot",
+              "entity": "$parent/body",
+              "slot": "screen"
+            },
+            "fallback": {
+              "type": "snapshot",
+              "image": "./gameboy-fallback.svg",
+              "alt": "Static Game Boy-style screen fallback"
+            },
+            "framePolicy": {
+              "mode": "continuous",
+              "maxFps": 60
+            },
+            "interaction": {
+              "pointer": true,
+              "keyboard": true,
+              "scroll": false
+            },
+            "presentation": {
+              "type": "texture",
+              "resolution": [
+                320,
+                288
+              ],
+              "fit": "contain",
+              "side": "double",
+              "emissive": {
+                "color": "#d9f7ff",
+                "intensity": 1.5,
+                "useTexture": true
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "building": {
+    "floors": [
+      {
+        "id": "ground",
+        "elevation": 0,
+        "rooms": [
+          {
+            "id": "arcade",
+            "size": [
+              10,
+              8
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "entities": [
+    {
+      "id": "monitor",
+      "use": "gameboy-monitor",
+      "room": "arcade",
+      "position": [
+        0,
+        0,
+        0
+      ]
+    }
+  ],
+  "exploration": {
+    "spawn": {
+      "room": "arcade",
+      "position": [
+        0,
+        1.65,
+        3.4
+      ]
+    },
+    "pointerLock": true
+  }
+}

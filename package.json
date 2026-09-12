@@ -1,0 +1,73 @@
+{
+  "name": "@blcklab/anyo-web-surface-texture",
+  "version": "1.0.1-rc.6",
+  "description": "Optional replacement-safe HD canvas/framebuffer-to-texture presentation for trusted Anyo Web Surface applications.",
+  "type": "module",
+  "sideEffects": false,
+  "license": "MIT",
+  "author": "Avelurs Tinio",
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "STABILITY.md",
+    "docs"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./sekai64": {
+      "types": "./dist/sekai64/index.d.ts",
+      "import": "./dist/sekai64/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "check": "npm run typecheck && npm test && npm run check:exports && npm run check:stability && npm run check:boundaries && npm run size && npm run pack:dry",
+    "check:exports": "node scripts/verify-exports.mjs",
+    "check:boundaries": "node scripts/verify-boundaries.mjs",
+    "size": "node scripts/size.mjs",
+    "pack:dry": "npm pack --dry-run",
+    "prepublishOnly": "npm run check",
+    "check:stability": "node scripts/verify-stability.mjs"
+  },
+  "peerDependencies": {
+    "@blcklab/anyo": ">=0.9.1-rc.16 <0.10.0 || >=0.10.0-rc.1 <1.0.0",
+    "@blcklab/sekai64": ">=0.7.0 <0.8.0 || >=0.8.0-0 <0.9.0"
+  },
+  "devDependencies": {
+    "@blcklab/anyo": "0.10.0-rc.1",
+    "@blcklab/sekai64": "0.8.0-rc.33",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blcklab/anyo-web-surface-texture.git"
+  },
+  "keywords": [
+    "anyo",
+    "sekai64",
+    "web-surface",
+    "dynamic-texture",
+    "webgpu",
+    "webgl2",
+    "webxr",
+    "framebuffer"
+  ]
+}
