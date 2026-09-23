@@ -54,7 +54,7 @@ function bridge(log) {
       log.creates += 1
       const resource = {
         texture: {}, width: options.source.width, height: options.source.height, version: 0, disposed: false,
-        update() { log.updates += 1 },
+        update(source) { resource.width = source.width; resource.height = source.height; log.updates += 1; log.updateSizes.push([source.width, source.height]) },
         resize(width, height) { resource.width = width; resource.height = height; log.resizes.push([width, height]) },
         dispose() { if (!resource.disposed) { resource.disposed = true; log.disposals += 1 } },
       }
@@ -88,7 +88,7 @@ function registry(log) {
 }
 
 async function settle() { await new Promise(resolve => setImmediate(resolve)) }
-function log() { return { creates: 0, updates: 0, resizes: [], disposals: 0, presented: [], bindings: [], bindingDisposals: 0, bridgeDisposals: 0, renders: [], pauses: 0, resumes: 0, performance: [], appDisposals: 0 } }
+function log() { return { creates: 0, updates: 0, updateSizes: [], resizes: [], disposals: 0, presented: [], bindings: [], bindingDisposals: 0, bridgeDisposals: 0, renders: [], pauses: 0, resumes: 0, performance: [], appDisposals: 0 } }
 
 test('distance scaling suspends app work while preserving the last native frame', async () => {
   const room = { id: 'room:a', roomId: 'a', visible: true }
@@ -115,7 +115,8 @@ test('distance scaling suspends app work while preserving the last native frame'
   time = 100
   runtime.update(0.1, scene.value)
   await settle()
-  assert.deepEqual(calls.resizes.at(-1), [80, 72])
+  assert.deepEqual(calls.resizes, [], 'distance scaling must not install a blank intermediate dynamic texture')
+  assert.deepEqual(calls.updateSizes.at(-1), [80, 72], 'the next rendered frame performs the size change atomically')
   assert.equal(calls.performance.at(-1).resolutionScale, 0.5)
 
   scene.camera.value = [0, 1, 20]
@@ -134,6 +135,56 @@ test('distance scaling suspends app work while preserving the last native frame'
   await settle()
   assert.equal(runtime.stats.active, 1)
   assert.equal(calls.performance.at(-1).suspended, false)
+  runtime.dispose()
+})
+
+test('distance quality scaling changes only uploaded texture size, never the app logical framebuffer', async () => {
+  const room = { id: 'room:a', roomId: 'a', visible: true }
+  const screen = primitive('screen', room)
+  screen.webSurface.presentation = { type: 'texture', resolution: [1920, 1080], fit: 'stretch' }
+  const scene = context([screen], room)
+  const calls = log()
+  const appResizes = []
+  const appCanvases = []
+  const appRegistry = createWebSurfaceAppRegistry()
+  appRegistry.register('framebuffer', {
+    mount() { return { dispose() {} } },
+    texture: { width: 1920, height: 1080 },
+    createTextureSurface(surfaceCanvas) {
+      appCanvases.push(surfaceCanvas)
+      return {
+        resize(width, height) { appResizes.push([width, height]) },
+        render() {},
+        dispose() {},
+      }
+    },
+  })
+  let time = 0
+  const runtime = new TextureWebSurfaceRuntime({
+    registry: appRegistry, createBridge: () => bridge(calls), canvasFactory: canvas, now: () => time,
+    performance: {
+      minResolutionScale: 0.25,
+      distanceTiers: [
+        { maxDistance: 3, resolutionScale: 1, fpsScale: 1 },
+        { maxDistance: 10, resolutionScale: 0.5, fpsScale: 0.5 },
+        { maxDistance: Infinity, resolutionScale: 0.25, fpsScale: 0.1 },
+      ],
+    },
+  })
+  await runtime.setup(scene.value)
+  assert.deepEqual(appResizes, [[1920, 1080]])
+  assert.equal(appCanvases[0].width, 1920)
+  assert.equal(appCanvases[0].height, 1080)
+
+  scene.camera.value = [0, 1, 6]
+  time = 100
+  runtime.update(0.1, scene.value)
+  await settle()
+  assert.deepEqual(calls.resizes, [], 'GPU output scaling must not publish a blank resize frame')
+  assert.deepEqual(calls.updateSizes.at(-1), [960, 540], 'the next real frame becomes the resized GPU source atomically')
+  assert.deepEqual(appResizes, [[1920, 1080]], 'app logical framebuffer must remain fixed')
+  assert.equal(appCanvases[0].width, 1920)
+  assert.equal(appCanvases[0].height, 1080)
   runtime.dispose()
 })
 
@@ -229,4 +280,20 @@ test('surface, diagnostic, and recovery controls remain bounded', async () => {
   assert.equal(runtime.stats.mounted, 1)
   assert.equal(runtime.stats.diagnosticHistory, 2)
   runtime.dispose()
+})
+
+import { selectDistanceTierWithHysteresis } from '../dist/performance.js'
+
+test('resolution hysteresis prevents tier thrashing near a distance boundary', () => {
+  const tiers = [
+    { maxDistance: 6, resolutionScale: 1, fpsScale: 1 },
+    { maxDistance: 18, resolutionScale: 0.75, fpsScale: 0.5 },
+    { maxDistance: Infinity, resolutionScale: 0.5, fpsScale: 0.25 },
+  ]
+  const initial = selectDistanceTierWithHysteresis(tiers, 5.9, undefined, 0.5)
+  assert.equal(initial.index, 0)
+  assert.equal(selectDistanceTierWithHysteresis(tiers, 6.2, initial.index, 0.5).index, 0)
+  assert.equal(selectDistanceTierWithHysteresis(tiers, 6.6, initial.index, 0.5).index, 1)
+  assert.equal(selectDistanceTierWithHysteresis(tiers, 5.8, 1, 0.5).index, 1)
+  assert.equal(selectDistanceTierWithHysteresis(tiers, 5.4, 1, 0.5).index, 0)
 })

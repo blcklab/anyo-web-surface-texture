@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises'
 const root = new URL('../', import.meta.url)
 const pkg = JSON.parse(await readFile(new URL('package.json', root), 'utf8'))
 
-assert.equal(pkg.version, '1.0.1-rc.6')
+assert.equal(pkg.version, '1.0.1-rc.19')
 assert.equal(pkg.author, 'Avelurs Tinio')
 assert.equal(pkg.license, 'MIT')
 assert.deepEqual(pkg.peerDependencies, {
@@ -18,10 +18,16 @@ const main = await import(new URL('dist/index.js', root))
 assert.deepEqual(Object.keys(main).sort(), [
   'HD_UI_TEXTURE_SURFACE_OPTIONS',
   'MOBILE_UI_TEXTURE_SURFACE_OPTIONS',
+  'SANDBOXED_TEXTURE_PROTOCOL',
+  'TEXTURE_SURFACE_QUALITY_PRESETS',
   'TextureWebSurfaceRuntime',
   'createDomAccessibilityCompanionProvider',
+  'createNativeBrowserTextureApp',
+  'createSandboxedCanvasTextureCapability',
   'createTextureSurfaceCanvas',
   'isTextureWebSurfaceApp',
+  'resolveTextureSurfaceQuality',
+  'textureSurfaceRegistrationForQuality',
   'textureWebSurfacePlugin',
 ])
 
@@ -35,6 +41,10 @@ for (const name of [
   'TextureSurfaceAccessibilityDescriptor',
   'TextureSurfacePerformanceState',
   'TextureSurfacePerformanceOptions',
+  'TextureSurfaceQualityOptions',
+  'TextureSurfaceNativeBrowserProvider',
+  'TextureSurfaceBrowserBackedApp',
+  'TextureSurfaceBrowserSource',
 ]) assert.ok(declarations.includes(name), `${name} must remain declared.`)
 
-console.log('Verified Web Surface Texture 1.0.1 RC runtime, type, peer, ownership, and subpath contracts.')
+console.log('Verified Web Surface Texture 1.0.1-rc.19 runtime, type, peer, ownership, and subpath contracts.')

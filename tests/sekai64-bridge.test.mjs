@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { PerspectiveCamera } from '@blcklab/sekai64/cameras'
 import { Geometry, PlaneGeometry } from '@blcklab/sekai64/geometry'
-import { StandardMaterial } from '@blcklab/sekai64/materials'
+import { StandardMaterial, Texture, TextureMaterial } from '@blcklab/sekai64/materials'
 import { Mesh, Node, Scene } from '@blcklab/sekai64/scene'
 import { createSekai64TextureSurfaceBridge } from '../dist/sekai64/index.js'
 
@@ -59,6 +59,65 @@ test('Sekai64 bridge replaces and restores the real plane material', () => {
   dynamic.dispose()
   bridge.dispose()
   scene.dispose(); camera.dispose()
+})
+
+test('Sekai64 bridge promotes TextureMaterial fallback planes to a live depth-writing screen material', () => {
+  const scene = new Scene()
+  const geometry = new PlaneGeometry({ width: 1, height: 1 })
+  const fallbackTexture = new Texture({ source: { kind: 'data', width: 1, height: 1, data: new Uint8Array([4, 8, 12, 255]) } })
+  const original = new TextureMaterial({
+    map: fallbackTexture,
+    tint: '#ffffff',
+    transparent: true,
+    doubleSided: true,
+    ownsTexture: false,
+  })
+  const plane = new Mesh({ id: 'entity:surface', geometry, material: original, ownsGeometry: true, ownsMaterial: true })
+  scene.add(plane)
+  const native = gpuRenderer()
+  const camera = new PerspectiveCamera({ aspect: 1 }); camera.position.z = 2; camera.updateMatrices()
+  const adapter = {
+    canvas: { getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) },
+    setPrimitiveVisibility() {},
+    getNativeAccess: () => ({
+      engine: { renderer: native }, scene, camera,
+      getPrimitiveNode: id => id === plane.id ? plane : undefined,
+      getRoomNode: () => undefined,
+    }),
+  }
+  const bridge = createSekai64TextureSurfaceBridge(adapter)
+  assert.ok(bridge)
+  const dynamic = bridge.createDynamicTexture({ source: { width: 1920, height: 1080 }, flipY: false })
+  const surface = {
+    ...primitive(),
+    webSurface: {
+      presentation: {
+        type: 'texture',
+        resolution: [1920, 1080],
+        side: 'double',
+        emissive: { color: '#ffffff', intensity: 1, useTexture: true },
+      },
+    },
+  }
+  const resolution = { resolved: true, kind: 'plane', target: { type: 'plane', size: [2, 1] }, primitive: surface }
+  const result = bridge.bindTarget({ primitive: surface, resolution, texture: dynamic.texture })
+  assert.equal(result.ok, true)
+  result.binding.setPresented(true)
+  assert.ok(plane.material instanceof StandardMaterial)
+  assert.equal(plane.material.baseColorTexture, dynamic.texture)
+  assert.equal(plane.material.emissiveTexture, dynamic.texture)
+  assert.equal(plane.material.transparent, false)
+  assert.equal(plane.material.depthWrite, true)
+  assert.equal(plane.material.side, 'double')
+  const hit = result.binding.hitTest({ type: 'screen', clientX: 50, clientY: 50 })
+  assert.ok(hit)
+  result.binding.setPresented(false)
+  assert.equal(plane.material, original)
+  result.binding.dispose()
+  assert.equal(plane.material, original)
+  dynamic.dispose()
+  bridge.dispose()
+  scene.dispose(); camera.dispose(); fallbackTexture.dispose()
 })
 
 test('Sekai64 bridge resolves a named entity-slot monitor mesh and hides the fallback plane only while live', () => {

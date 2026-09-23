@@ -1,4 +1,4 @@
-import type { WebSurfacePresentation } from '@blcklab/anyo'
+import type { WebSurfaceTexturePresentation } from '@blcklab/anyo'
 import type { TextureSurfaceCanvas, TextureSurfaceDiagnostic } from './types.js'
 
 interface Canvas2DLike {
@@ -27,15 +27,17 @@ export interface TextureSurfacePresentationState {
 
 export function createTextureSurfacePresentation(
   source: TextureSurfaceCanvas,
-  presentation: WebSurfacePresentation | undefined,
+  presentation: WebSurfaceTexturePresentation | undefined,
   canvasFactory: (width: number, height: number) => TextureSurfaceCanvas,
   diagnostics?: (diagnostic: TextureSurfaceDiagnostic) => void,
   primitiveId?: string,
+  rasterScale = 1,
 ): TextureSurfacePresentationState {
   const sourceWidth = positiveDimension(source.width)
   const sourceHeight = positiveDimension(source.height)
-  const baseOutputWidth = positiveDimension(presentation?.resolution?.[0] ?? sourceWidth)
-  const baseOutputHeight = positiveDimension(presentation?.resolution?.[1] ?? sourceHeight)
+  rasterScale = Math.min(2, Math.max(1, rasterScale))
+  const baseOutputWidth = positiveDimension((presentation?.resolution?.[0] ?? sourceWidth) * (presentation?.resolution ? rasterScale : 1))
+  const baseOutputHeight = positiveDimension((presentation?.resolution?.[1] ?? sourceHeight) * (presentation?.resolution ? rasterScale : 1))
   const fit = presentation?.fit ?? 'stretch'
   const transform = presentation?.transform
   let outputScale = 1
@@ -133,7 +135,7 @@ function presentationMatrix(
   outputWidth: number,
   outputHeight: number,
   fit: 'stretch' | 'contain' | 'cover',
-  transform: WebSurfacePresentation['transform'] | undefined,
+  transform: WebSurfaceTexturePresentation['transform'] | undefined,
 ): Affine2D {
   let scaleX = outputWidth / sourceWidth
   let scaleY = outputHeight / sourceHeight
@@ -204,7 +206,7 @@ function get2d(canvas: TextureSurfaceCanvas): Canvas2DLike | null {
     : null
 }
 
-function isIdentityTransform(value: WebSurfacePresentation['transform'] | undefined): boolean {
+function isIdentityTransform(value: WebSurfaceTexturePresentation['transform'] | undefined): boolean {
   return !value
     || ((value.offset?.[0] ?? 0) === 0 && (value.offset?.[1] ?? 0) === 0
       && (value.scale?.[0] ?? 1) === 1 && (value.scale?.[1] ?? 1) === 1

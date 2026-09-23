@@ -40,3 +40,25 @@ test('offset, scale, and rotation share one invertible visual/input transform', 
   assert.ok(Math.abs(mapped[0] - 0.5) < 1e-9)
   assert.ok(Math.abs(mapped[1] - 0.5) < 1e-9)
 })
+
+test('rasterScale supersamples explicit presentation resolution without changing UV semantics', () => {
+  const source = canvas(3840, 2160)
+  const state = createTextureSurfacePresentation(
+    source,
+    { type: 'texture', resolution: [2560, 1440], fit: 'stretch' },
+    canvas,
+    undefined,
+    'screen:hero',
+    1.5,
+  )
+  assert.equal(state.baseOutputWidth, 3840)
+  assert.equal(state.baseOutputHeight, 2160)
+  assert.equal(state.outputWidth, 3840)
+  assert.equal(state.outputHeight, 2160)
+  assert.deepEqual(state.mapUv([0.25, 0.75]), [0.25, 0.75])
+})
+
+test('rasterScale is deliberately bounded to 2x', () => {
+  const state = createTextureSurfacePresentation(canvas(200, 200), { type: 'texture', resolution: [100, 100] }, canvas, undefined, undefined, 3)
+  assert.deepEqual([state.baseOutputWidth, state.baseOutputHeight], [200, 200])
+})

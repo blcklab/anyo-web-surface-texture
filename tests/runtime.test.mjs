@@ -146,10 +146,14 @@ test('on-change texture surfaces render, pause with room visibility, resume once
   await settle()
   assert.equal(log.resumes, 2)
   assert.equal(log.renders, 3)
+  const presentedBeforeWorldPause = log.presented.at(-1)
+  assert.equal(presentedBeforeWorldPause, true)
   events.emit('world:pause')
   assert.equal(log.pauses, 2)
+  assert.equal(log.presented.at(-1), true, 'world pause keeps the last GPU frame presented')
   events.emit('world:start')
   assert.equal(log.resumes, 3)
+  assert.equal(log.presented.at(-1), true)
 
   runtime.dispose()
   runtime.dispose()
@@ -158,6 +162,54 @@ test('on-change texture surfaces render, pause with room visibility, resume once
   assert.equal(log.textureDisposals, 1)
   assert.equal(log.bindingDisposals, 1)
   assert.equal(log.bridgeDisposals, 1)
+})
+
+
+test('a world paused before first upload still renders one initial physical frame and then idles', async () => {
+  const room = { id: 'room:a', roomId: 'a', visible: true }
+  const primitive = makePrimitive('entity:screen', room)
+  const events = createEvents()
+  const context = makeContext([primitive], room, events)
+  context.renderer.whenIdle = async () => { events.emit('world:pause') }
+  const registry = createWebSurfaceAppRegistry()
+  const log = { renders: 0, pauses: 0, resumes: 0, actives: [], updates: 0, presented: [], disposals: 0, textureDisposals: 0, bindingDisposals: 0, bridgeDisposals: 0 }
+  registry.register('framebuffer', {
+    mount() { return { dispose() {} } },
+    texture: { width: 160, height: 144 },
+    createTextureSurface() {
+      return {
+        render() { log.renders++ },
+        setActive(value) { log.actives.push(value) },
+        pause() { log.pauses++ },
+        resume() { log.resumes++ },
+        dispose() { log.disposals++ },
+      }
+    },
+  })
+  const bridge = makeBridge(log)
+  const runtime = new TextureWebSurfaceRuntime({
+    registry,
+    createBridge: () => bridge,
+    canvasFactory: (width, height) => ({ width, height }),
+    now: () => 0,
+  })
+
+  await runtime.setup(context)
+  assert.equal(log.renders, 1, 'paused worlds still get one initial physical frame')
+  assert.equal(log.updates, 1)
+  assert.equal(log.presented.at(-1), true, 'initial physical frame remains presented while controls are paused')
+  assert.equal(log.pauses, 1, 'surface idles after its first paused-world frame')
+  const rendersAfterSetup = log.renders
+  runtime.update(1 / 60, context)
+  await settle()
+  assert.equal(log.renders, rendersAfterSetup, 'paused world does not keep rendering')
+
+  events.emit('world:start')
+  runtime.update(1 / 60, context)
+  await settle()
+  assert.ok(log.renders >= rendersAfterSetup + 1, 'world start resumes rendering')
+  assert.equal(log.presented.at(-1), true)
+  runtime.dispose()
 })
 
 test('one coordinated scheduler bounds continuous uploads per update', async () => {
@@ -652,5 +704,84 @@ test('contain presentation stages output resolution and inversely maps input int
   assert.deepEqual(received.at(-1).pixel, [50, 50])
   hitUv = [0.1, 0.5]
   assert.equal(runtime.input.dispatchRay({ phase: 'select', origin: [0, 0, 2], direction: [0, 0, -1] }), false, 'letterbox bars do not intercept input')
+  runtime.dispose()
+})
+
+test('host can reserve secondary mouse buttons for camera controls while primary click remains normal Web Surface interaction', async () => {
+  const room = { id: 'room:a', roomId: 'a', visible: true }
+  const primitive = makePrimitive('entity:screen', room)
+  primitive.webSurface.interaction = { pointer: true, keyboard: true, scroll: true }
+  const context = makeContext([primitive], room, createEvents())
+  context.renderer.canvas = {
+    addEventListener() {}, removeEventListener() {}, focus() {}, setPointerCapture() {}, releasePointerCapture() {},
+    getBoundingClientRect() { return { left: 0, top: 0, width: 640, height: 360, right: 640, bottom: 360 } },
+  }
+  const registry = createWebSurfaceAppRegistry()
+  const received = []
+  registry.register('framebuffer', {
+    mount() { return { dispose() {} } },
+    createTextureSurface() {
+      return { render() {}, handleInput(event) { received.push(event); return true }, dispose() {} }
+    },
+  })
+  const bridge = makeBridge({ updates: 0, presented: [], textureDisposals: 0, bindingDisposals: 0, bridgeDisposals: 0 })
+  bridge.bindTarget = () => ({ ok: true, binding: {
+    kind: 'plane', texture: {}, presented: false,
+    setPresented(value) { this.presented = value },
+    hitTest() { return this.presented ? { uv: [0.5, 0.5], point: [0, 0, 0], normal: [0, 0, 1], distance: 1, frontFacing: true } : null },
+    dispose() {},
+  } })
+  const runtime = new TextureWebSurfaceRuntime({
+    registry, createBridge: () => bridge,
+    canvasFactory: (width, height) => ({ width, height }),
+    input: { pointerButtons: [0] },
+  })
+  await runtime.setup(context)
+
+  const event = (button, buttons, pointerId) => ({
+    pointerId, pointerType: 'mouse', button, buttons, clientX: 320, clientY: 180, timeStamp: pointerId,
+    preventDefault() {}, stopPropagation() {},
+  })
+
+  runtime.handleDomPointer('down', event(2, 2, 9))
+  runtime.handleDomPointer('move', event(0, 2, 9))
+  runtime.handleDomPointer('up', event(2, 0, 9))
+  assert.equal(received.length, 0, 'secondary-button camera drag is not claimed by the Web Surface')
+
+  runtime.handleDomPointer('down', event(0, 1, 10))
+  runtime.handleDomPointer('up', event(0, 0, 10))
+  assert.deepEqual(received.map(value => value.phase), ['down', 'up', 'click'])
+  assert.ok(received.every(value => value.button === 0), 'primary click is forwarded with normal browser button semantics')
+  runtime.dispose()
+})
+
+test('texture rasterScale supersamples the application framebuffer while preserving logical quality size', async () => {
+  const room = { id: 'room:a', roomId: 'a', visible: true }
+  const primitive = makePrimitive('entity:supersampled', room)
+  const events = createEvents()
+  const context = makeContext([primitive], room, events)
+  const registry = createWebSurfaceAppRegistry()
+  const log = { renders: 0, updates: 0, presented: [], textureDisposals: 0, bindingDisposals: 0, bridgeDisposals: 0 }
+  let mountedCanvas
+  let mountedQuality
+  registry.register('framebuffer', {
+    mount() { return { dispose() {} } },
+    texture: { width: 200, height: 100, rasterScale: 1.5 },
+    createTextureSurface(canvas, _props, appContext) {
+      mountedCanvas = canvas
+      mountedQuality = appContext.quality
+      return { render() { log.renders++ }, dispose() {} }
+    },
+  })
+  const runtime = new TextureWebSurfaceRuntime({
+    registry,
+    createBridge: () => makeBridge(log),
+    canvasFactory: (width, height) => ({ width, height }),
+    now: () => 0,
+  })
+  await runtime.setup(context)
+  assert.deepEqual([mountedCanvas.width, mountedCanvas.height], [300, 150])
+  assert.deepEqual([mountedQuality.logicalWidth, mountedQuality.logicalHeight], [200, 100])
+  assert.equal(mountedQuality.deviceScale, 1.5)
   runtime.dispose()
 })

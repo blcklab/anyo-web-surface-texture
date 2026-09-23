@@ -18,4 +18,4 @@ for (const file of await walk(dist)) {
   gzip += gzipSync(data).length
 }
 console.log(JSON.stringify({ javascriptBytes: raw, javascriptGzipBytes: gzip }, null, 2))
-if (gzip > 28000) throw new Error(`Published JavaScript exceeds 28 kB gzip budget: ${gzip}`)
+if (gzip > 34750) throw new Error(`Published JavaScript exceeds 34.75 kB gzip budget: ${gzip}`)

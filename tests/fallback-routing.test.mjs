@@ -50,6 +50,12 @@ function primitive() {
   }
 }
 
+function physicalPrimitive() {
+  const value = primitive()
+  value.webSurface.presentation = { type: 'texture', resolution: [1920, 1080], fit: 'stretch' }
+  return value
+}
+
 function context(value) {
   const eventBus = events()
   return {
@@ -103,6 +109,26 @@ async function withFakeDom(callback) {
   }
 }
 
+test('explicit overlay presentation stays browser-native even when the app also has a texture capability', async () => {
+  await withFakeDom(async body => {
+    const registry = createWebSurfaceAppRegistry()
+    let domMounts = 0
+    let textureMounts = 0
+    registry.register('screen-app', {
+      mount() { domMounts++; return { dispose() {} } },
+      createTextureSurface() { textureMounts++; return { render() {}, dispose() {} } },
+    })
+    const value = primitive()
+    value.webSurface.presentation = { type: 'overlay', resolution: [1280, 720] }
+    const plugin = textureWebSurfacePlugin({ registry, createBridge: () => bridge(), canvasFactory: (width, height) => ({ width, height }) })
+    await plugin.setup(context(value))
+    assert.equal(textureMounts, 0)
+    assert.equal(domMounts, 1)
+    assert.equal(body.children[0].children.length, 1)
+    plugin.dispose()
+  })
+})
+
 test('successful texture presentation claims the app before DOM fallback can mount it', async () => {
   await withFakeDom(async body => {
     const registry = createWebSurfaceAppRegistry()
@@ -136,6 +162,46 @@ test('apps without texture capability continue through the managed DOM fallback'
     assert.equal(body.children[0].children.length, 1)
     plugin.dispose()
     assert.equal(domDisposals, 1)
+  })
+})
+
+test('physical texture presentation never degrades into a depth-breaking DOM overlay', async () => {
+  await withFakeDom(async body => {
+    const registry = createWebSurfaceAppRegistry()
+    let domMounts = 0
+    const diagnostics = []
+    registry.register('screen-app', {
+      mount() { domMounts++; return { dispose() {} } },
+    })
+    const plugin = textureWebSurfacePlugin({
+      registry,
+      createBridge: () => bridge(),
+      canvasFactory: (width, height) => ({ width, height }),
+      diagnostics: diagnostic => diagnostics.push(diagnostic),
+    })
+    await plugin.setup(context(physicalPrimitive()))
+    assert.equal(domMounts, 0)
+    assert.equal(body.children[0].children.length, 0, 'physical fallback remains renderer-owned, not a DOM section')
+    const unsupported = diagnostics.find(value => value.code === 'ANYO_TEXTURE_APP_UNSUPPORTED')
+    assert.equal(unsupported?.details?.physicalTextureRequested, true)
+    assert.equal(unsupported?.details?.domFallbackAllowed, false)
+    plugin.dispose()
+  })
+})
+
+test('physical texture render failure restores the renderer fallback instead of mounting DOM', async () => {
+  await withFakeDom(async body => {
+    const registry = createWebSurfaceAppRegistry()
+    let domMounts = 0
+    registry.register('screen-app', {
+      mount() { domMounts++; return { dispose() {} } },
+      createTextureSurface() { return { render() { throw new Error('bad framebuffer') }, dispose() {} } },
+    })
+    const plugin = textureWebSurfacePlugin({ registry, createBridge: () => bridge(), canvasFactory: (width, height) => ({ width, height }) })
+    await plugin.setup(context(physicalPrimitive()))
+    assert.equal(domMounts, 0)
+    assert.equal(body.children[0].children.length, 0)
+    plugin.dispose()
   })
 })
 

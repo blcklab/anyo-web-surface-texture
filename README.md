@@ -15,8 +15,51 @@ Required release-candidate baseline:
 ```txt
 @blcklab/anyo                       >=0.9.1-rc.16 <0.10.0 || >=0.10.0-rc.1 <1.0.0
 @blcklab/sekai64                    >=0.7.0 <0.8.0 || >=0.8.0-0 <0.9.0
-@blcklab/anyo-web-surface-texture   1.0.1-rc.6
+@blcklab/anyo-web-surface-texture   1.0.1-rc.8
 ```
+
+## S24 quality model
+
+S24 keeps application layout and GPU allocation separate. The built-in physical presets are `low` (640×360), `balanced` (960×540), `hd` (1280×720), and `full-hd` (1920×1080). `full-hd` is a genuine 1920×1080 physical ceiling; device-pixel ratio can reduce the logical browser viewport but never multiplies the backing allocation into accidental 4K.
+
+```ts
+import { resolveTextureSurfaceQuality } from '@blcklab/anyo-web-surface-texture'
+
+resolveTextureSurfaceQuality({ mode: 'full-hd', maxDevicePixelRatio: 2 }, 2)
+// physical: 1920×1080, logical: 960×540, deviceScale: 2
+```
+
+The existing distance/performance scheduler remains authoritative. `resolutionHysteresis` adds a small dead band around tier boundaries so a camera near a threshold does not oscillate between quality tiers. State, focus, scroll, and application instances are not recreated merely because the uploaded presentation resolution changes.
+
+## Optional native-browser provider
+
+A capable desktop/native host may inject `browserProvider`. The package does **not** ship Chromium, Electron, CEF, Tauri, a remote browser, or any other browsing engine. Backend choice remains host-owned and never appears in world JSON.
+
+```ts
+const texturePlugin = textureWebSurfacePlugin({
+  registry,
+  createBridge: renderer => createSekai64TextureSurfaceBridge(renderer),
+  quality: { mode: 'auto', autoPreset: 'balanced', maxDevicePixelRatio: 2 },
+  browserProvider: hostBrowserProvider,
+})
+```
+
+For a generic `source.type = "url"`, the provider is used only when present and when its host trust/capability gate accepts the URL. Otherwise the normal standards-compliant DOM/iframe route remains available when embedding is permitted. CSP, `frame-ancestors`, `X-Frame-Options`, CORS, cookie rules, and iframe sandboxing are never bypassed. Arbitrary DOM is **not** silently screenshot/rasterized into a GPU texture.
+
+Provider-backed physical surfaces expose host navigation controls through `texturePlugin.browser`:
+
+```ts
+if (texturePlugin.browser.canControl('entity:browser-wall')) {
+  await texturePlugin.browser.navigate('entity:browser-wall', 'https://example.com/')
+  await texturePlugin.browser.back('entity:browser-wall')
+  await texturePlugin.browser.forward('entity:browser-wall')
+  await texturePlugin.browser.reload('entity:browser-wall')
+}
+```
+
+These calls only delegate to the host-supplied provider. URL/network trust policy remains a host responsibility.
+
+Hosts that discover repository applications may also attach a host-only `browserSource: { url }` field to the registered app. This field is not a world-schema feature. When a native provider is present and accepts that resolved URL, the same `source.type = "app"` surface can be promoted to the provider-backed texture path; otherwise its ordinary `mount()` implementation remains the DOM fallback. The World Loader uses this to keep repository discovery and trust policy host-owned while allowing capable native hosts to render the same app on a physical 3D screen.
 
 ## Register a trusted canvas application
 
@@ -92,11 +135,11 @@ World JSON can use the existing renderer-neutral frame policy:
 ```json
 {
   "type": "web-surface",
-  "source": { "type": "app", "app": "status-screen" },
-  "presentation": {
-    "frame": { "mode": "on-change" }
-  },
-  "target": { "type": "entity-slot", "entity": "$parent/body", "slot": "screen" }
+  "webSurface": {
+    "source": { "type": "app", "app": "status-screen" },
+    "target": { "type": "entity-slot", "entity": "$parent/body", "slot": "screen" },
+    "framePolicy": { "mode": "on-change" }
+  }
 }
 ```
 
@@ -292,7 +335,7 @@ WS7 adds optional JSON-safe presentation intent without changing the registered 
 
 `resolution` controls the uploaded texture while the application keeps its own logical framebuffer dimensions. `contain`, `cover`, normalized offset/scale, and rotation use one invertible transform, so pointer, touch, and XR input still reaches the correct logical pixel. Empty contain bars do not intercept input.
 
-Curved screens require ordinary UV-mapped geometry; no curved-screen application API exists. Repeated mesh primitives provide material-slot selection, `uvSet` selects UV0 or UV1, and the bridge restores the exact authored screen and glass materials when presentation stops.
+Curved screens require ordinary UV-mapped geometry; no curved-screen application API exists. Repeated mesh primitives provide material-slot selection, `uvSet` selects UV0 or UV1, and the bridge restores the exact authored screen and glass materials when presentation stops. Renderer-generated plane targets may start with either Sekai64 `StandardMaterial` or `TextureMaterial`; both are supported, and `TextureMaterial` fallback planes are promoted to a depth-writing live screen material while presented.
 
 ## Fallback and lifecycle
 
@@ -344,3 +387,49 @@ The plugin is safe to reuse across Anyo world replacement. `teardown()` releases
 For text-heavy dashboards, start with `HD_UI_TEXTURE_SURFACE_OPTIONS`; for mobile-class devices use `MOBILE_UI_TEXTURE_SURFACE_OPTIONS`. Both presets keep one host-owned texture path with sRGB sampling, mipmaps, and the correct canvas orientation.
 
 The package intentionally keeps zero runtime dependencies. Anyo and Sekai64 remain peer dependencies so the host owns the exact engine versions.
+
+## Sandboxed physical-screen companion
+
+Repository HTML remains a normal sandboxed DOM/iframe application. When a repository also supplies an explicit canvas texture companion, a host can register that app with `createSandboxedCanvasTextureCapability()`. The companion executes in a sandboxed iframe (`allow-scripts` only by default), renders app-authored canvas frames, and transfers `ImageBitmap` frames back to the existing dynamic-texture scheduler. Because the result is a real Sekai64 texture, VRM characters and geometry in front of the screen occlude it normally.
+
+This is **not** arbitrary DOM capture: the package does not screenshot or serialize HTML/CSS into pixels. Apps that do not implement a texture companion continue through the standards DOM/iframe fallback, while native hosts may still inject the existing browser provider for full browser-engine framebuffer presentation.
+
+## Physical-screen ownership (rc.9)
+
+A world surface that declares `presentation.type: "texture"` is a physical 3D screen. The texture package will use a texture-capable app, sandboxed canvas companion, or host browser provider when available. If none is available, it leaves the renderer snapshot/plane visible instead of mounting a DOM iframe over the scene. This preserves correct depth and occlusion.
+
+Managed DOM remains available for explicit `renderMode: "dom-overlay"` and for legacy auto surfaces that do not request texture presentation. When an authored `presentation.resolution` exists, Anyo uses it as a stable DOM logical viewport so camera distance changes only projection, not responsive layout.
+
+Distance quality scaling is output-only: an app authored at 1920×1080 stays logically 1920×1080 while the uploaded texture may adapt to 1280×720 or 960×540 for performance.
+
+## S24 rc.12 GPU upload/orientation follow-up
+
+- Sandboxed canvas texture companions default to `flipY: true`, matching top-left browser canvas pixels to Sekai64 plane UVs on both WebGL2 and WebGPU. Explicit `flipY` overrides remain supported.
+- Distance/adaptive quality changes no longer call `DynamicTexture.resize()` before a real frame exists. The last valid GPU frame remains presented until the next prepared frame is uploaded at the new size, preventing black-frame flashes and invalid browser external-image/sub-upload races.
+- The logical application framebuffer remains fixed; only the prepared GPU upload surface changes size.
+
+
+### Primary-click host policy
+
+Use `input: { pointerButtons: [0] }` when the host wants normal left-click Web Surface interaction while reserving secondary/right drag for camera control. Omitting the option preserves all-button forwarding.
+
+Focused wheel ownership is explicit: clicking a scroll-capable physical Web Surface focuses it. While the pointer remains over that same focused surface, wheel input is intercepted before renderer-canvas camera listeners and forwarded only to the Web Surface. Hovering an unfocused screen does not steal wheel input, so host camera zoom continues normally until the user focuses a screen. Set `preventWheelDefault: false` only if a host intentionally wants shared wheel behavior.
+
+## High-quality physical screens
+
+Physical texture surfaces default to sRGB, linear/trilinear sampling, and generated mipmaps. Quality presets include `full-hd` (1920×1080), optional `qhd` (2560×1440), and optional `ultra` (3840×2160). Prefer Full HD for normal monitors; reserve QHD/Ultra for large or text-heavy hero displays. Sekai64 controls anisotropy through renderer image-quality policy.
+
+
+## Supersampled physical text
+
+Text-heavy physical screens may opt into raster supersampling without changing their authored world size or logical UI layout:
+
+```ts
+texture: {
+  width: 2560,
+  height: 1440,
+  rasterScale: 1.5,
+}
+```
+
+This renders the application and physical presentation at 3840x2160 while keeping 2560x1440 as the base logical registration. `rasterScale` is intentionally bounded to 1-2 and remains opt-in because it increases GPU memory and upload cost. Distance/thermal/memory policies may still reduce the uploaded output scale.

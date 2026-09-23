@@ -1,5 +1,5 @@
 # Maintainer notes
 
-This repository was reconstructed from the genuine `1.0.1-rc.2` TypeScript source checkpoint. The known `1.0.1-rc.5` distribution was used as the compatibility oracle for runtime output and public declarations.
+This repository continues the validated `1.0.1-rc.7` S24 Web Surface baseline.
 
-Before release, run `npm install` and `npm run check` on Node 22 and Node 24. The rc.6 release must preserve the rc.5 public exports and replacement-safe lifecycle behavior.
+Before release, run `npm install` and `npm run check` on supported Node versions. Keep `.internal/` source-only and excluded from npm publication. rc.8 adds only the explicit sandboxed canvas/ImageBitmap physical-screen companion; arbitrary DOM rasterization remains unsupported and normal HTML continues through the DOM fallback unless a texture companion or host browser provider is available.

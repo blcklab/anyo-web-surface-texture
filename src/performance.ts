@@ -16,6 +16,7 @@ export interface ResolvedTextureSurfacePerformanceOptions {
   readonly maxDiagnosticHistory: number
   readonly minResolutionScale: number
   readonly distanceTiers: readonly TextureSurfaceDistanceTier[]
+  readonly resolutionHysteresis: number
   readonly pool: false | { readonly maxEntries: number; readonly maxBytes: number }
   readonly occlusion: false | { readonly mode: 'renderer-ray' | 'custom'; readonly intervalMs: number }
   readonly thermalIntervalMs: number
@@ -106,6 +107,7 @@ export function resolvePerformanceOptions(
     maxDiagnosticHistory: positiveInteger(options?.maxDiagnosticHistory ?? 256, 'performance.maxDiagnosticHistory'),
     minResolutionScale: unitInterval(options?.minResolutionScale ?? 0.25, 'performance.minResolutionScale'),
     distanceTiers,
+    resolutionHysteresis: nonNegativeNumber(options?.resolutionHysteresis ?? 0.5, 'performance.resolutionHysteresis'),
     pool,
     occlusion,
     thermalIntervalMs: positiveNumber(options?.thermal?.intervalMs ?? 1000, 'performance.thermal.intervalMs'),
@@ -117,6 +119,34 @@ export function selectDistanceTier(
   distance: number,
 ): TextureSurfaceDistanceTier {
   return tiers.find(tier => distance <= tier.maxDistance) ?? tiers[tiers.length - 1] as TextureSurfaceDistanceTier
+}
+
+/** Selects a distance tier while preserving the current tier inside a small dead-band. */
+export function selectDistanceTierWithHysteresis(
+  tiers: readonly TextureSurfaceDistanceTier[],
+  distance: number,
+  currentIndex: number | undefined,
+  hysteresis: number,
+): { readonly index: number; readonly tier: TextureSurfaceDistanceTier } {
+  const normalized = Math.max(0, Number.isFinite(distance) ? distance : Number.POSITIVE_INFINITY)
+  let directIndex = tiers.findIndex(tier => normalized <= tier.maxDistance)
+  if (directIndex < 0) directIndex = tiers.length - 1
+  const boundedCurrent = currentIndex === undefined ? -1 : Math.max(0, Math.min(tiers.length - 1, currentIndex))
+  if (boundedCurrent < 0 || boundedCurrent === directIndex || hysteresis <= 0) {
+    return Object.freeze({ index: directIndex, tier: tiers[directIndex] as TextureSurfaceDistanceTier })
+  }
+  if (directIndex > boundedCurrent) {
+    const boundary = tiers[boundedCurrent]?.maxDistance ?? Number.POSITIVE_INFINITY
+    if (normalized <= boundary + hysteresis) {
+      return Object.freeze({ index: boundedCurrent, tier: tiers[boundedCurrent] as TextureSurfaceDistanceTier })
+    }
+  } else {
+    const previousBoundary = boundedCurrent > 0 ? tiers[boundedCurrent - 1]?.maxDistance ?? 0 : 0
+    if (normalized >= Math.max(0, previousBoundary - hysteresis)) {
+      return Object.freeze({ index: boundedCurrent, tier: tiers[boundedCurrent] as TextureSurfaceDistanceTier })
+    }
+  }
+  return Object.freeze({ index: directIndex, tier: tiers[directIndex] as TextureSurfaceDistanceTier })
 }
 
 export function thermalMultipliers(state: TextureSurfaceThermalState): {
@@ -178,5 +208,10 @@ function positiveNumber(value: number, name: string): number {
 
 function unitInterval(value: number, name: string): number {
   if (!Number.isFinite(value) || value <= 0 || value > 1) throw new Error(`${name} must be greater than 0 and at most 1.`)
+  return value
+}
+
+function nonNegativeNumber(value: number, name: string): number {
+  if (!Number.isFinite(value) || value < 0) throw new Error(`${name} must be a non-negative finite number.`)
   return value
 }

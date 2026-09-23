@@ -1,9 +1,9 @@
-import type { RendererAdapter, WebSurfacePresentation } from '@blcklab/anyo'
+import type { RendererAdapter, WebSurfaceTexturePresentation } from '@blcklab/anyo'
 import type { Sekai64RendererNativeAccess } from '@blcklab/anyo/renderer-sekai64'
 import { createDynamicTextureCapability, type DynamicTextureCapability } from '@blcklab/sekai64/dynamic-texture'
 import { Raycaster } from '@blcklab/sekai64/interaction'
 import { Vector3 } from '@blcklab/sekai64/math'
-import { StandardMaterial, type Texture } from '@blcklab/sekai64/materials'
+import { StandardMaterial, TextureMaterial, type Material, type Texture } from '@blcklab/sekai64/materials'
 import { Mesh, Node } from '@blcklab/sekai64/scene'
 import type {
   TextureSurfaceBindingResult,
@@ -29,7 +29,7 @@ export interface Sekai64TextureSurfaceDecorationContext {
   readonly liveMaterial: StandardMaterial
   readonly texture: Texture
   readonly uvSet: 0 | 1
-  readonly presentation: WebSurfacePresentation | undefined
+  readonly presentation: WebSurfaceTexturePresentation | undefined
   readonly access: Sekai64RendererNativeAccess
 }
 
@@ -102,9 +102,10 @@ class Sekai64TextureSurfaceBridge implements TextureSurfaceRendererBridge {
 
     const target = this.resolveTargetMesh(request)
     if (!target.ok) return target
-    if (!(target.mesh.material instanceof StandardMaterial)) {
-      return failure(false, 'ANYO_TEXTURE_MATERIAL_UNSUPPORTED', 'The resolved texture target does not use a Sekai64 StandardMaterial.', {
+    if (!(target.mesh.material instanceof StandardMaterial) && !(target.mesh.material instanceof TextureMaterial)) {
+      return failure(false, 'ANYO_TEXTURE_MATERIAL_UNSUPPORTED', 'The resolved texture target does not use a supported Sekai64 screen material.', {
         material: target.mesh.material.constructor.name,
+        supportedMaterials: ['StandardMaterial', 'TextureMaterial'],
       })
     }
     const selectedUvs = uvSet === 1 ? target.mesh.geometry.uvs1 : target.mesh.geometry.uvs
@@ -115,24 +116,28 @@ class Sekai64TextureSurfaceBridge implements TextureSurfaceRendererBridge {
       })
     }
 
-    const presentation = request.primitive.webSurface?.presentation
+    const presentation = request.primitive.webSurface?.presentation?.type === 'texture'
+      ? request.primitive.webSurface.presentation
+      : undefined
     const glass = this.resolveGlassBinding(request, presentation, target.mesh)
     const sourcePrimitiveVisible = this.access.getPrimitiveNode(request.primitive.id)?.visible ?? request.primitive.visible
     const originalMaterial = target.mesh.material
     const liveMaterial = cloneScreenMaterial(originalMaterial, request.texture, uvSet, presentation)
     let decoration: Sekai64TextureSurfaceDecoration | undefined
     try {
-      decoration = this.options.decorateBinding?.({
-        primitiveId: request.primitive.id,
-        kind: request.resolution.kind,
-        mesh: target.mesh,
-        originalMaterial,
-        liveMaterial,
-        texture: request.texture,
-        uvSet,
-        presentation,
-        access: this.access,
-      }) ?? undefined
+      if (originalMaterial instanceof StandardMaterial) {
+        decoration = this.options.decorateBinding?.({
+          primitiveId: request.primitive.id,
+          kind: request.resolution.kind,
+          mesh: target.mesh,
+          originalMaterial,
+          liveMaterial,
+          texture: request.texture,
+          uvSet,
+          presentation,
+          access: this.access,
+        }) ?? undefined
+      }
     } catch (error) {
       this.report({
         severity: 'warning',
@@ -208,7 +213,7 @@ class Sekai64TextureSurfaceBridge implements TextureSurfaceRendererBridge {
 
   private resolveGlassBinding(
     request: Parameters<TextureSurfaceRendererBridge['bindTarget']>[0],
-    presentation: WebSurfacePresentation | undefined,
+    presentation: WebSurfaceTexturePresentation | undefined,
     targetMesh: Mesh,
   ): GlassBinding | undefined {
     const glass = presentation?.glass
@@ -266,7 +271,7 @@ class Sekai64MaterialTextureBinding implements TextureSurfaceTargetBinding {
     private readonly sourcePrimitiveVisible: boolean,
     kind: 'plane' | 'entity-slot' | 'mesh',
     private readonly mesh: Mesh,
-    private readonly originalMaterial: StandardMaterial,
+    private readonly originalMaterial: Material,
     texture: Texture,
     private readonly liveMaterial: StandardMaterial,
     private readonly glass?: GlassBinding,
@@ -354,11 +359,43 @@ class Sekai64MaterialTextureBinding implements TextureSurfaceTargetBinding {
   }
 }
 
-function cloneScreenMaterial(source: StandardMaterial, texture: Texture, uvSet: 0 | 1, presentation: WebSurfacePresentation | undefined): StandardMaterial {
+function cloneScreenMaterial(
+  source: StandardMaterial | TextureMaterial,
+  texture: Texture,
+  uvSet: 0 | 1,
+  presentation: WebSurfaceTexturePresentation | undefined,
+): StandardMaterial {
   const useLiveEmissive = presentation?.emissive?.useTexture ?? Boolean(presentation?.emissive)
+  const opacity = presentation?.opacity ?? (source instanceof StandardMaterial ? source.baseColor.a : 1)
+  const transparent = presentation?.transparent ?? (source instanceof StandardMaterial ? source.transparent : opacity < 1)
+  const depthWrite = transparent || opacity < 1 ? false : source instanceof TextureMaterial ? true : source.depthWrite
+
+  if (source instanceof TextureMaterial) {
+    return new StandardMaterial({
+      label: `${source.label ?? 'material'}:anyo-web-surface`,
+      baseColor: [source.tint.r, source.tint.g, source.tint.b, opacity],
+      baseColorTexture: texture,
+      baseColorTexCoord: uvSet,
+      metallic: 0,
+      roughness: 1,
+      emissive: presentation?.emissive?.color ?? '#ffffff',
+      emissiveIntensity: presentation?.emissive?.intensity ?? 0,
+      ...(useLiveEmissive ? { emissiveTexture: texture, emissiveTexCoord: uvSet } : {}),
+      alphaMode: transparent || opacity < 1 ? 'blend' : source.alphaCutoff > 0 ? 'mask' : 'opaque',
+      alphaCutoff: source.alphaCutoff,
+      transparent,
+      side: presentation?.side ?? source.side,
+      depthWrite,
+      wireframe: source.wireframe,
+      sortBias: source.sortBias,
+      ownsTextures: false,
+      autoloadTextures: false,
+    })
+  }
+
   return new StandardMaterial({
     label: `${source.label ?? 'material'}:anyo-web-surface`,
-    baseColor: [1, 1, 1, presentation?.opacity ?? source.baseColor.a],
+    baseColor: [1, 1, 1, opacity],
     baseColorTexture: texture,
     baseColorTexCoord: uvSet,
     metallic: source.metallic,
@@ -376,12 +413,13 @@ function cloneScreenMaterial(source: StandardMaterial, texture: Texture, uvSet: 
     ...(source.occlusionTexture ? { occlusionTexture: source.occlusionTexture } : {}),
     occlusionTexCoord: source.occlusionTexCoord,
     occlusionStrength: source.occlusionStrength,
-    alphaMode: presentation?.transparent || (presentation?.opacity ?? 1) < 1 ? 'blend' : source.alphaMode,
+    alphaMode: transparent || opacity < 1 ? 'blend' : source.alphaMode,
     alphaCutoff: source.alphaCutoff,
-    transparent: presentation?.transparent ?? source.transparent,
+    transparent,
     side: presentation?.side ?? source.side,
-    depthWrite: presentation?.transparent || (presentation?.opacity ?? 1) < 1 ? false : source.depthWrite,
+    depthWrite,
     wireframe: source.wireframe,
+    sortBias: source.sortBias,
     ownsTextures: false,
     autoloadTextures: false,
   })

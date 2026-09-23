@@ -10,10 +10,12 @@ import {
   type WebSurfaceAppContext,
 } from '@blcklab/anyo/web-surface'
 import { createTextureSurfaceCanvas } from './canvas.js'
+import { createNativeBrowserTextureApp } from './browser-provider.js'
+import { resolveTextureSurfaceQuality } from './quality.js'
 import { createDomAccessibilityCompanionProvider, resolveAccessibilityPreferences } from './accessibility.js'
 import { createTextureSurfacePresentation, type TextureSurfacePresentationState } from './presentation.js'
 import {
-  fitResolutionScale, resolvePerformanceOptions, selectDistanceTier, thermalMultipliers, textureBytes,
+  fitResolutionScale, resolvePerformanceOptions, selectDistanceTierWithHysteresis, thermalMultipliers, textureBytes,
   type ResolvedTextureSurfacePerformanceOptions,
 } from './performance.js'
 import {
@@ -40,6 +42,7 @@ import {
   type TextureSurfaceHit,
   type TextureSurfaceHitTestRequest,
   type TextureSurfaceInputController,
+  type TextureSurfaceBrowserController,
   type TextureSurfacePointerInputEvent,
   type TextureSurfacePointerPhase,
   type TextureSurfacePointerType,
@@ -62,6 +65,7 @@ interface MountedTextureSurface {
   canvas: TextureSurfaceCanvas
   presentation: TextureSurfacePresentationState
   presentationJson: string
+  sourceKey: string
   bridge: TextureSurfaceRendererBridge
   dynamicTexture: ReturnType<TextureSurfaceRendererBridge['createDynamicTexture']>
   binding: TextureSurfaceTargetBinding
@@ -91,6 +95,7 @@ interface MountedTextureSurface {
   lastOcclusionCheck: number
   targetPosition: readonly [number, number, number]
   textureOptions: TextureSurfaceRegistrationOptions
+  distanceTierIndex: number
 }
 
 interface PooledDynamicTexture {
@@ -100,7 +105,13 @@ interface PooledDynamicTexture {
   lastUsed: number
 }
 
-const DEFAULT_RESOLUTION = Object.freeze({ width: 512, height: 512 })
+const DEFAULT_RESOLUTION = Object.freeze({
+  width: 512, height: 512,
+  colorSpace: 'srgb' as const,
+  minFilter: 'linear-mipmap-linear' as const,
+  magFilter: 'linear' as const,
+  mipmaps: 'generate' as const,
+})
 
 export function textureWebSurfacePlugin(options: TextureWebSurfacePluginOptions): TextureWebSurfacePlugin {
   let runtime: TextureWebSurfaceRuntime | null = null
@@ -132,6 +143,14 @@ export function textureWebSurfacePlugin(options: TextureWebSurfacePluginOptions)
     focus(primitiveId: string, request?: TextureSurfaceFocusRequest) { return runtime?.input.focus(primitiveId, request) ?? false },
     blur(primitiveId?: string) { runtime?.input.blur(primitiveId) },
     get focusedPrimitiveId() { return runtime?.input.focusedPrimitiveId ?? null },
+  })
+
+  const browser: TextureSurfaceBrowserController = Object.freeze({
+    canControl(primitiveId: string) { return runtime?.browser.canControl(primitiveId) ?? false },
+    navigate(primitiveId: string, url: string) { return runtime?.browser.navigate(primitiveId, url) ?? Promise.resolve(false) },
+    back(primitiveId: string) { return runtime?.browser.back(primitiveId) ?? Promise.resolve(false) },
+    forward(primitiveId: string) { return runtime?.browser.forward(primitiveId) ?? Promise.resolve(false) },
+    reload(primitiveId: string) { return runtime?.browser.reload(primitiveId) ?? Promise.resolve(false) },
   })
 
   const maintenance: TextureSurfaceMaintenanceController = Object.freeze({
@@ -183,6 +202,7 @@ export function textureWebSurfacePlugin(options: TextureWebSurfacePluginOptions)
     name: 'anyo:web-surface-texture',
     registry: options.registry,
     input,
+    browser,
     maintenance,
     capabilities: Object.freeze({
       canvasApplications: true as const,
@@ -210,6 +230,7 @@ export function textureWebSurfacePlugin(options: TextureWebSurfacePluginOptions)
       distanceScaling: true as const,
       texturePooling: options.performance?.pool !== false,
       occlusionSuspension: Boolean(options.performance?.occlusion),
+      nativeBrowserProvider: Boolean(options.browserProvider),
     }),
     async setup(context) {
       if (finalDisposed) throw new Error('Texture Web Surface plugin is disposed.')
@@ -227,7 +248,7 @@ export function textureWebSurfacePlugin(options: TextureWebSurfacePluginOptions)
           const nextFallback = new WebSurfaceRuntime({
             ...fallbackOptions,
             registry: options.registry,
-            shouldPresent: primitive => !nextRuntime.isTextureClaimed(primitive.id),
+            shouldPresent: primitive => nextRuntime.shouldPresentDomFallback(primitive),
             onDiagnostic(diagnostic) {
               fallbackOptions.onDiagnostic?.(diagnostic)
               options.diagnostics?.({
@@ -307,6 +328,7 @@ export class TextureWebSurfaceRuntime {
   private lastThermalCheck = Number.NEGATIVE_INFINITY
   private recovering: Promise<void> | null = null
   readonly input: TextureSurfaceInputController
+  readonly browser: TextureSurfaceBrowserController
   readonly maintenance: TextureSurfaceMaintenanceController
 
   constructor(private readonly options: TextureWebSurfacePluginOptions) {
@@ -339,11 +361,49 @@ export class TextureWebSurfaceRuntime {
       blur(primitiveId?: string): void { runtime.blur(primitiveId) },
       get focusedPrimitiveId(): string | null { return runtime.focusedSurfaceId },
     })
+    this.browser = Object.freeze({
+      canControl(primitiveId: string): boolean { return runtime.canControlBrowser(primitiveId) },
+      navigate(primitiveId: string, url: string): Promise<boolean> { return runtime.invokeBrowserAction(primitiveId, 'navigate', url) },
+      back(primitiveId: string): Promise<boolean> { return runtime.invokeBrowserAction(primitiveId, 'back') },
+      forward(primitiveId: string): Promise<boolean> { return runtime.invokeBrowserAction(primitiveId, 'forward') },
+      reload(primitiveId: string): Promise<boolean> { return runtime.invokeBrowserAction(primitiveId, 'reload') },
+    })
     this.maintenance = Object.freeze({
       recover(): Promise<void> { return runtime.recover() },
       trimPool(): void { runtime.trimPool() },
       get stats(): TextureSurfaceRuntimeStats { return runtime.stats },
     })
+  }
+
+  private canControlBrowser(primitiveId: string): boolean {
+    const instance = this.mounted.get(primitiveId)?.instance
+    return Boolean(instance && (instance.navigate || instance.back || instance.forward || instance.reload))
+  }
+
+  private async invokeBrowserAction(
+    primitiveId: string,
+    action: 'navigate' | 'back' | 'forward' | 'reload',
+    url?: string,
+  ): Promise<boolean> {
+    const surface = this.mounted.get(primitiveId)
+    if (!surface || surface.disposed || surface.failed) return false
+    const fn = surface.instance[action]
+    if (typeof fn !== 'function') return false
+    try {
+      if (action === 'navigate') await (fn as (url: string) => void | Promise<void>).call(surface.instance, String(url ?? ''))
+      else await (fn as () => void | Promise<void>).call(surface.instance)
+      surface.dirtyVersion += 1
+      return true
+    } catch (error) {
+      this.report({
+        severity: 'warning',
+        code: 'ANYO_TEXTURE_BROWSER_ACTION_FAILED',
+        message: `Browser surface ${action}() failed.`,
+        primitiveId,
+        details: { error: error instanceof Error ? error.message : String(error) },
+      })
+      return false
+    }
   }
 
   get stats(): TextureSurfaceRuntimeStats {
@@ -397,6 +457,24 @@ export class TextureWebSurfaceRuntime {
   isTextureClaimed(primitiveId: string): boolean {
     const surface = this.mounted.get(primitiveId)
     return Boolean(surface && !surface.failed)
+  }
+
+  /**
+   * Decide whether the managed DOM runtime may own presentation for one surface.
+   *
+   * A surface that explicitly requests native texture presentation is physical
+   * world geometry. Falling back to a browser DOM overlay would break scene
+   * depth/occlusion, so the renderer snapshot/plane stays authoritative when
+   * no texture capability is available. Explicit dom-overlay/external/snapshot
+   * modes keep their existing behavior.
+   */
+  shouldPresentDomFallback(primitive: CompiledPrimitive & { webSurface: CompiledWebSurface }): boolean {
+    if (this.isTextureClaimed(primitive.id)) return false
+    const definition = primitive.webSurface
+    if (definition.source.type === 'snapshot') return true
+    if (definition.presentation?.type === 'overlay') return true
+    if (definition.renderMode === 'dom-overlay' || definition.renderMode === 'external' || definition.renderMode === 'snapshot') return true
+    return definition.presentation?.type !== 'texture'
   }
 
   onPresentationChange(listener: () => void): () => void {
@@ -476,34 +554,83 @@ export class TextureWebSurfaceRuntime {
 
   private async sync(context: PluginRuntimeContext): Promise<void> {
     const eligible = context.compiled.primitives.filter(
-      (primitive): primitive is CompiledPrimitive & { webSurface: CompiledWebSurface } =>
-        Boolean(primitive.webSurface && primitive.webSurface.source.type === 'app'),
+      (primitive): primitive is CompiledPrimitive & { webSurface: CompiledWebSurface } => {
+        if (!primitive.webSurface) return false
+        // Explicit generic DOM/snapshot/external modes belong to the core runtime.
+        // `auto` and legacy texture-oriented values remain eligible here.
+        if (primitive.webSurface.presentation?.type === 'overlay'
+          || primitive.webSurface.renderMode === 'dom-overlay'
+          || primitive.webSurface.renderMode === 'snapshot'
+          || primitive.webSurface.renderMode === 'external') return false
+        const source = primitive.webSurface.source
+        if (source.type === 'app') return true
+        if (source.type !== 'url' || !this.options.browserProvider) return false
+        try { return this.options.browserProvider.canPresent?.(source.url) !== false }
+        catch (error) {
+          this.reportOnce(undefined, primitive.id, 'ANYO_TEXTURE_BROWSER_PROVIDER_CAPABILITY_FAILED', {
+            severity: 'warning',
+            code: 'ANYO_TEXTURE_BROWSER_PROVIDER_CAPABILITY_FAILED',
+            message: 'The host browser-provider capability check failed; DOM/iframe fallback remains available.',
+            details: { error: error instanceof Error ? error.message : String(error) },
+          })
+          return false
+        }
+      },
     )
     const ids = new Set(eligible.map(surface => surface.id))
     for (const id of [...this.mounted.keys()]) if (!ids.has(id)) this.unmount(id)
 
     for (const primitive of eligible) {
       const source = primitive.webSurface.source
-      if (source.type !== 'app') continue
-      const app = this.options.registry.get(source.app)
-      if (!isTextureWebSurfaceApp(app)) {
-        if (app) this.reportOnce(undefined, primitive.id, 'ANYO_TEXTURE_APP_UNSUPPORTED', {
-          severity: 'info',
-          code: 'ANYO_TEXTURE_APP_UNSUPPORTED',
-          message: `Web-surface app "${source.app}" has no createTextureSurface() capability. DOM or snapshot presentation remains available.`,
-          primitiveId: primitive.id,
-        })
+      if (source.type === 'snapshot') continue
+      let sourceKey = source.type === 'app' ? `app:${source.app}` : `url:${source.url}`
+      let app: TextureWebSurfaceApp | undefined
+      if (source.type === 'app') {
+        const registered = this.options.registry.get(source.app)
+        if (isTextureWebSurfaceApp(registered)) {
+          app = registered
+        } else {
+          const browserUrl = registeredBrowserSourceUrl(registered)
+          if (browserUrl && this.options.browserProvider) {
+            app = createNativeBrowserTextureApp(primitive, this.options.browserProvider, this.options.quality, browserUrl) ?? undefined
+            if (app) sourceKey = `${sourceKey}:browser:${browserUrl}`
+          }
+          if (!app) {
+            if (registered) {
+              const physical = primitive.webSurface.presentation?.type === 'texture'
+              this.reportOnce(undefined, primitive.id, 'ANYO_TEXTURE_APP_UNSUPPORTED', {
+                severity: 'info',
+                code: 'ANYO_TEXTURE_APP_UNSUPPORTED',
+                message: physical
+                  ? `Web-surface app "${source.app}" has no texture capability for this host. The physical renderer snapshot/plane remains active; DOM overlay fallback is intentionally suppressed to preserve scene depth.`
+                  : `Web-surface app "${source.app}" has no texture capability for this host. DOM or snapshot presentation remains available.`,
+                primitiveId: primitive.id,
+                details: { physicalTextureRequested: physical, domFallbackAllowed: !physical },
+              })
+            }
+            continue
+          }
+        }
+      } else if (source.type === 'url' && this.options.browserProvider) {
+        app = createNativeBrowserTextureApp(primitive, this.options.browserProvider, this.options.quality) ?? undefined
+        if (!app) continue
+      } else {
         continue
       }
       const existing = this.mounted.get(primitive.id)
       if (!existing) {
-        await this.mount(primitive, app, context)
+        await this.mount(primitive, app, sourceKey, context)
+        continue
+      }
+      if (existing.sourceKey !== sourceKey) {
+        this.unmount(primitive.id)
+        await this.mount(primitive, app, sourceKey, context)
         continue
       }
       const presentationJson = JSON.stringify(primitive.webSurface.presentation ?? null)
       if (presentationJson !== existing.presentationJson) {
         this.unmount(primitive.id)
-        await this.mount(primitive, app, context)
+        await this.mount(primitive, app, sourceKey, context)
         continue
       }
       existing.primitive = primitive
@@ -512,7 +639,7 @@ export class TextureWebSurfaceRuntime {
         existing.targetPosition = targetPosition(updatedResolution, primitive)
         existing.targetPrimitiveIds = targetPrimitiveIds(updatedResolution, primitive.id)
       }
-      const props = frozenProps(source.props)
+      const props = frozenProps(source.type === 'app' ? source.props : undefined)
       const propsJson = JSON.stringify(props)
       if (propsJson !== existing.propsJson) {
         existing.props = props
@@ -542,6 +669,7 @@ export class TextureWebSurfaceRuntime {
   private async mount(
     primitive: CompiledPrimitive & { webSurface: CompiledWebSurface },
     app: TextureWebSurfaceApp,
+    sourceKey: string,
     context: PluginRuntimeContext,
   ): Promise<void> {
     const bridge = this.bridge
@@ -569,13 +697,25 @@ export class TextureWebSurfaceRuntime {
       ...(this.options.defaultResolution ?? {}),
       ...(app.texture ?? {}),
     }
-    const width = positiveInteger(textureOptions.width, 'texture width')
-    const height = positiveInteger(textureOptions.height, 'texture height')
+    const bw = positiveInteger(textureOptions.width, 'texture width')
+    const bh = positiveInteger(textureOptions.height, 'texture height')
+    const rasterScale = Math.min(2, Math.max(1, textureOptions.rasterScale ?? 1))
+    const width = positiveInteger(bw * rasterScale, 'raster width')
+    const height = positiveInteger(bh * rasterScale, 'raster height')
     const canvas = (this.options.canvasFactory ?? createTextureSurfaceCanvas)(width, height)
     canvas.width = width
     canvas.height = height
     const controller = new AbortController()
     const props = frozenProps(primitive.webSurface.source.type === 'app' ? primitive.webSurface.source.props : undefined)
+    const quality = app.quality
+      ? resolveTextureSurfaceQuality(app.quality, currentDevicePixelRatio())
+      : resolveTextureSurfaceQuality({
+          mode: 'auto',
+          resolution: { width, height },
+          logicalResolution: { width: bw, height: bh },
+          devicePixelRatio: rasterScale,
+          maxDevicePixelRatio: rasterScale,
+        })
     let pendingAccessibility: TextureSurfaceAccessibilityDescriptor | null = null
     try { pendingAccessibility = resolveAccessibilityDescriptor(app, props) }
     catch (error) {
@@ -588,12 +728,14 @@ export class TextureWebSurfaceRuntime {
 
     let presentation: TextureSurfacePresentationState
     try {
+      const texturePresentation = primitive.webSurface.presentation?.type === 'texture' ? primitive.webSurface.presentation : undefined
       presentation = createTextureSurfacePresentation(
         canvas,
-        primitive.webSurface.presentation,
+        texturePresentation,
         this.options.canvasFactory ?? createTextureSurfaceCanvas,
         diagnostic => this.report(diagnostic),
         primitive.id,
+        rasterScale,
       )
     } catch (error) {
       controller.abort()
@@ -610,7 +752,10 @@ export class TextureWebSurfaceRuntime {
     const now = this.now()
     this.pollThermal(now)
     const distance = vecDistance(rendererCameraPosition(context.renderer), position)
-    const tier = selectDistanceTier(this.performanceOptions.distanceTiers, distance)
+    const initialTierSelection = selectDistanceTierWithHysteresis(
+      this.performanceOptions.distanceTiers, distance, undefined, this.performanceOptions.resolutionHysteresis,
+    )
+    const tier = initialTierSelection.tier
     const thermal = thermalMultipliers(this.thermalState)
     const requestedScale = Math.max(this.performanceOptions.minResolutionScale, tier.resolutionScale * thermal.resolution)
     const fit = this.fitScaleForMemory(
@@ -663,6 +808,7 @@ export class TextureWebSurfaceRuntime {
       ...baseAppContext(context, primitive, controller.signal),
       canvas,
       backend: bridge.backend,
+      quality,
       input: {
         requestFocus: request => mounted ? this.focus(mounted.primitive.id, request) : false,
         releaseFocus: () => { if (mounted) this.blur(mounted.primitive.id) },
@@ -765,6 +911,7 @@ export class TextureWebSurfaceRuntime {
     const surface: MountedTextureSurface = {
       primitive, app, instance, canvas, presentation,
       presentationJson: JSON.stringify(primitive.webSurface.presentation ?? null),
+      sourceKey,
       bridge, dynamicTexture, binding: bound.binding, controller, props,
       propsJson: JSON.stringify(props), active: false, disposed: false,
       dirtyVersion: 1, renderedVersion: 0, rendering: false,
@@ -774,6 +921,7 @@ export class TextureWebSurfaceRuntime {
       performance: pendingPerformance, performanceStateJson: JSON.stringify(pendingPerformance),
       textureBytes: bytes, textureKey, targetPrimitiveIds: targetIds,
       lastOcclusionCheck: Number.NEGATIVE_INFINITY, targetPosition: position, textureOptions,
+      distanceTierIndex: initialTierSelection.index,
     }
     mounted = surface
     this.mounted.set(primitive.id, surface)
@@ -824,7 +972,10 @@ export class TextureWebSurfaceRuntime {
     const frame: TextureSurfaceFrame = Object.freeze({ time, deltaSeconds, frame: surface.frame, reason })
     return Promise.resolve().then(() => surface.instance.render?.(surface.props, frame)).then(() => {
       if (surface.disposed || surface.controller.signal.aborted) return
-      surface.dynamicTexture.update(surface.presentation.prepare())
+      const prepared = surface.presentation.prepare()
+      surface.dynamicTexture.update(prepared)
+      surface.textureBytes = textureBytes(prepared.width, prepared.height, surface.textureOptions.mipmaps ?? 'none')
+      surface.textureKey = dynamicTextureKey(surface.textureOptions, prepared.width, prepared.height)
       this.setReady(surface, true)
       this.setFailed(surface, false)
       surface.lastRenderTime = time
@@ -851,19 +1002,28 @@ export class TextureWebSurfaceRuntime {
   }
 
   private refreshActive(surface: MountedTextureSurface, context: PluginRuntimeContext): void {
-    this.setActive(surface, !surface.failed && this.worldActive && effectiveVisibility(surface.primitive, context))
+    // Visibility/presentation ownership is independent from world pause. A paused
+    // world keeps the last physical GPU frame presented; only updates/input stop.
+    this.setActive(surface, !surface.failed && effectiveVisibility(surface.primitive, context))
   }
 
   private setActive(surface: MountedTextureSurface, active: boolean): void {
-    if (surface.active === active) return
-    surface.active = active
-    surface.binding.setPresented(active && surface.ready)
+    const changed = surface.active !== active
+    if (changed) {
+      surface.active = active
+      surface.binding.setPresented(active && surface.ready)
+      this.refreshAccessibility(surface)
+    }
+    // World start/pause may change running state even when visibility is unchanged.
     this.refreshRunning(surface)
-    this.refreshAccessibility(surface)
   }
 
   private refreshRunning(surface: MountedTextureSurface): void {
+    // An unready visible surface is allowed to render one initial frame even while
+    // world controls are paused, so physical screens never flash back to snapshots.
+    const needsInitialFrame = surface.active && !surface.ready
     const running = surface.active && !surface.failed && !surface.performance.suspended
+      && (this.worldActive || needsInitialFrame)
     if (surface.running === running) return
     surface.running = running
     invoke(surface, 'setActive', () => surface.instance.setActive?.(running), diagnostic => this.report(diagnostic))
@@ -912,6 +1072,7 @@ export class TextureWebSurfaceRuntime {
     if (surface.ready === ready) return
     surface.ready = ready
     surface.binding.setPresented(surface.active && ready)
+    this.refreshRunning(surface)
   }
 
   private setFailed(surface: MountedTextureSurface, failed: boolean): void {
@@ -950,7 +1111,13 @@ export class TextureWebSurfaceRuntime {
       on('pointerup', event => this.handleDomPointer('up', event))
       on('pointercancel', event => this.handleDomPointer('cancel', event))
       on('pointerleave', event => this.handleCanvasLeave(event))
-      on('wheel', event => this.handleWheel(event), { passive: false })
+      const wheelTarget: EventTarget = canvas.ownerDocument ?? canvas
+      const wheel = (event: Event): void => {
+        if (wheelTarget !== canvas && event.target !== canvas) return
+        this.handleWheel(event as WheelEvent)
+      }
+      wheelTarget.addEventListener('wheel', wheel, { capture: true, passive: false })
+      this.inputCleanups.push(() => wheelTarget.removeEventListener('wheel', wheel, true))
     }
     const keyboardTarget = this.options.input?.keyboardTarget || canvas
     const keyDown = (event: Event): void => this.handleKeyboard('down', event as KeyboardEvent)
@@ -982,8 +1149,15 @@ export class TextureWebSurfaceRuntime {
     }
   }
 
+  private allowPointer(phase: Exclude<TextureSurfacePointerPhase, 'enter' | 'leave' | 'click' | 'wheel'>, event: PointerEvent): boolean {
+    const allowed = this.options.input && this.options.input.pointerButtons
+    if (!allowed || phase === 'cancel') return true
+    if (phase !== 'move') return allowed.includes(event.button)
+    return !event.buttons || allowed.some(button => (event.buttons & (button === 1 ? 4 : button === 2 ? 2 : 1 << button)) !== 0)
+  }
+
   private handleDomPointer(phase: Exclude<TextureSurfacePointerPhase, 'enter' | 'leave' | 'click' | 'wheel'>, event: PointerEvent): void {
-    if (this.disposed) return
+    if (this.disposed || !this.allowPointer(phase, event)) return
     const canvas = this.context?.renderer.canvas
     if (!canvas) return
     const pointerLocked = typeof document !== 'undefined' && document.pointerLockElement === canvas
@@ -1052,7 +1226,10 @@ export class TextureWebSurfaceRuntime {
 
   private handleWheel(event: WheelEvent): void {
     const canvas = this.context?.renderer.canvas
-    if (!canvas) return
+    const focusedId = this.focusedSurfaceId
+    if (!canvas || !focusedId) return
+    const surface = this.mounted.get(focusedId)
+    if (!surface?.primitive.webSurface.interaction.scroll) return
     const rect = canvas.getBoundingClientRect()
     const pointerLocked = typeof document !== 'undefined' && document.pointerLockElement === canvas
     const request: TextureSurfaceHitTestRequest = {
@@ -1060,13 +1237,17 @@ export class TextureWebSurfaceRuntime {
       clientX: pointerLocked ? rect.left + rect.width / 2 : event.clientX,
       clientY: pointerLocked ? rect.top + rect.height / 2 : event.clientY,
     }
-    const candidate = this.pickSurface(request, 'scroll')
+    const candidate = this.hitSpecific(focusedId, request)
     if (!candidate) return
-    const consumed = this.dispatchPointer(candidate.surface, candidate.hit, {
+    this.dispatchPointer(candidate.surface, candidate.hit, {
       phase: 'wheel', pointerId: 0, pointerType: 'mouse', button: 0, buttons: 0,
       captured: false, timestamp: event.timeStamp, delta: [event.deltaX, event.deltaY, event.deltaZ],
     })
-    if (consumed && ((this.options.input && this.options.input.preventWheelDefault) ?? true)) event.preventDefault()
+    if ((this.options.input && this.options.input.preventWheelDefault) ?? true) {
+      event.preventDefault()
+      event.stopPropagation()
+      event.stopImmediatePropagation()
+    }
   }
 
   private dispatchRay(input: TextureSurfaceRayInput): boolean {
@@ -1186,6 +1367,7 @@ export class TextureWebSurfaceRuntime {
     const surface = this.mounted.get(primitiveId)
     const focusCapable = Boolean(surface && (
       surface.primitive.webSurface.interaction.keyboard
+      || surface.primitive.webSurface.interaction.scroll
       || surface.app.devices?.gamepad
       || surface.app.devices?.audio
       || surface.app.devices?.textInput
@@ -1415,7 +1597,11 @@ export class TextureWebSurfaceRuntime {
   private updatePerformance(surface: MountedTextureSurface, context: PluginRuntimeContext, now: number): void {
     const camera = rendererCameraPosition(context.renderer)
     const distance = vecDistance(camera, surface.targetPosition)
-    const tier = selectDistanceTier(this.performanceOptions.distanceTiers, distance)
+    const tierSelection = selectDistanceTierWithHysteresis(
+      this.performanceOptions.distanceTiers, distance, surface.distanceTierIndex, this.performanceOptions.resolutionHysteresis,
+    )
+    surface.distanceTierIndex = tierSelection.index
+    const tier = tierSelection.tier
     const thermal = thermalMultipliers(this.thermalState)
     let occluded = surface.performance.occluded
     if (this.performanceOptions.occlusion && now - surface.lastOcclusionCheck >= this.performanceOptions.occlusion.intervalMs) {
@@ -1494,24 +1680,12 @@ export class TextureWebSurfaceRuntime {
     if (!fit) return { scale: surface.presentation.outputScale, memoryLimited: true }
     const changed = surface.presentation.setOutputScale(fit.scale)
     if (!changed) return fit
-    const width = surface.presentation.outputWidth
-    const height = surface.presentation.outputHeight
-    const bytes = textureBytes(width, height, surface.textureOptions.mipmaps ?? 'none')
-    try {
-      const result = surface.dynamicTexture.resize(width, height)
-      void Promise.resolve(result).catch(error => this.reportOnce(surface, surface.primitive.id, 'ANYO_TEXTURE_RESIZE_FAILED', {
-        severity: 'warning', code: 'ANYO_TEXTURE_RESIZE_FAILED', message: 'Dynamic texture resolution scaling failed.',
-        details: { error: error instanceof Error ? error.message : String(error) },
-      }))
-      surface.textureBytes = bytes
-      surface.textureKey = dynamicTextureKey(surface.textureOptions, width, height)
-      surface.dirtyVersion += 1
-    } catch (error) {
-      this.reportOnce(surface, surface.primitive.id, 'ANYO_TEXTURE_RESIZE_FAILED', {
-        severity: 'warning', code: 'ANYO_TEXTURE_RESIZE_FAILED', message: 'Dynamic texture resolution scaling failed.',
-        details: { error: error instanceof Error ? error.message : String(error) },
-      })
-    }
+    // Do not call DynamicTexture.resize() here. That would replace the last good
+    // frame with a blank intermediate source before the app has produced the
+    // newly-sized frame. On browser GPU backends that transient blank canvas can
+    // also be rejected as an invalid external image. Keep the previous texture
+    // presented until the next render atomically updates it with prepare().
+    surface.dirtyVersion += 1
     return fit
   }
 
@@ -1664,12 +1838,14 @@ export class TextureWebSurfaceRuntime {
       this.worldActive = true
       for (const surface of this.mounted.values()) this.refreshActive(surface, this.context ?? context)
     }))
-    const pause = (): void => {
+    this.worldCleanups.push(context.world.on('world:pause', () => {
+      this.worldActive = false
+      for (const surface of this.mounted.values()) this.refreshRunning(surface)
+    }))
+    this.worldCleanups.push(context.world.on('world:stop', () => {
       this.worldActive = false
       for (const surface of this.mounted.values()) this.setActive(surface, false)
-    }
-    this.worldCleanups.push(context.world.on('world:pause', pause))
-    this.worldCleanups.push(context.world.on('world:stop', pause))
+    }))
   }
 
   private reportOnce(surface: MountedTextureSurface | undefined, primitiveId: string, code: string, diagnostic: TextureSurfaceDiagnostic): void {
@@ -1799,6 +1975,18 @@ function domPointerType(value: string): TextureSurfacePointerType {
 
 function clamp01(value: number): number { return Math.max(0, Math.min(1, value)) }
 
+function registeredBrowserSourceUrl(app: unknown): string | undefined {
+  if (!app || typeof app !== 'object') return undefined
+  const candidate = (app as { browserSource?: { url?: unknown } }).browserSource?.url
+  if (typeof candidate !== 'string' || !candidate.trim()) return undefined
+  try {
+    const url = new URL(candidate)
+    return url.href
+  } catch {
+    return undefined
+  }
+}
+
 function frozenProps(value: Record<string, unknown> | undefined): Readonly<Record<string, unknown>> {
   return Object.freeze(structuredClone(value ?? {}))
 }
@@ -1859,4 +2047,9 @@ async function safeDispose(
       details: { error: error instanceof Error ? error.message : String(error) },
     })
   }
+}
+
+function currentDevicePixelRatio(): number {
+  const value = Number(globalThis.devicePixelRatio ?? 1)
+  return Number.isFinite(value) && value > 0 ? value : 1
 }

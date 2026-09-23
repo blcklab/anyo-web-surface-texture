@@ -1,6 +1,6 @@
 {
   "name": "@blcklab/anyo-web-surface-texture",
-  "version": "1.0.1-rc.6",
+  "version": "1.0.1-rc.19",
   "description": "Optional replacement-safe HD canvas/framebuffer-to-texture presentation for trusted Anyo Web Surface applications.",
   "type": "module",
   "sideEffects": false,
@@ -46,8 +46,8 @@
     "@blcklab/sekai64": ">=0.7.0 <0.8.0 || >=0.8.0-0 <0.9.0"
   },
   "devDependencies": {
-    "@blcklab/anyo": "0.10.0-rc.1",
-    "@blcklab/sekai64": "0.8.0-rc.33",
+    "@blcklab/anyo": "0.10.0-rc.3",
+    "@blcklab/sekai64": "0.8.0-rc.34",
     "typescript": "^5.8.3"
   },
   "engines": {

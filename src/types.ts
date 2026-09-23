@@ -26,7 +26,43 @@ export interface TextureSurfaceResolution {
   readonly height: number
 }
 
+export type TextureSurfaceQualityPreset = 'low' | 'balanced' | 'hd' | 'full-hd' | 'qhd' | 'ultra'
+export type TextureSurfaceQualityMode = 'auto' | TextureSurfaceQualityPreset
+
+export interface TextureSurfaceQualityOptions {
+  /** Auto resolves to balanced unless autoPreset is supplied. */
+  readonly mode?: TextureSurfaceQualityMode
+  readonly autoPreset?: TextureSurfaceQualityPreset
+  /** Explicit physical framebuffer ceiling. Presets remain useful labels/policies. */
+  readonly resolution?: TextureSurfaceResolution
+  /** Optional logical browser/UI viewport. Defaults to physical size divided by bounded DPR. */
+  readonly logicalResolution?: TextureSurfaceResolution
+  readonly devicePixelRatio?: number | 'auto'
+  /** Defaults to 2. Physical preset size is never multiplied by DPR. */
+  readonly maxDevicePixelRatio?: number
+}
+
+export interface TextureSurfaceBrowserSource {
+  /** Resolved host-owned URL for an app that may be promoted to a native browser texture when a provider is available. */
+  readonly url: string
+}
+
+export interface TextureSurfaceBrowserBackedApp extends RegisteredWebSurfaceApp {
+  /** Host-only capability hint. This metadata is never authored in world JSON. */
+  readonly browserSource: TextureSurfaceBrowserSource
+}
+
+export interface TextureSurfaceResolvedQuality extends TextureSurfaceResolution {
+  readonly mode: TextureSurfaceQualityMode
+  readonly preset: TextureSurfaceQualityPreset
+  readonly logicalWidth: number
+  readonly logicalHeight: number
+  readonly deviceScale: number
+}
+
 export interface TextureSurfaceRegistrationOptions extends TextureSurfaceResolution {
+  /** Optional supersampling multiplier for the application framebuffer and uploaded presentation. Defaults to 1; maximum 2. */
+  readonly rasterScale?: number
   readonly label?: string
   readonly flipY?: boolean
   readonly colorSpace?: 'srgb' | 'linear'
@@ -145,6 +181,8 @@ export interface TextureSurfaceAccessibilityContext {
 export interface TextureWebSurfaceAppContext extends WebSurfaceAppContext {
   readonly canvas: TextureSurfaceCanvas
   readonly backend: string
+  /** Physical framebuffer and logical UI sizing chosen for this mounted surface. */
+  readonly quality: TextureSurfaceResolvedQuality
   readonly input: TextureSurfaceInputContext
   readonly accessibility: TextureSurfaceAccessibilityContext
   readonly performance: TextureSurfacePerformanceContext
@@ -153,6 +191,11 @@ export interface TextureWebSurfaceAppContext extends WebSurfaceAppContext {
 }
 
 export interface TextureWebSurfaceAppInstance {
+  /** Optional browser navigation surface. Native/remote browser-backed apps may implement these. */
+  navigate?(url: string): void | Promise<void>
+  back?(): void | Promise<void>
+  forward?(): void | Promise<void>
+  reload?(): void | Promise<void>
   render?(props: Readonly<Record<string, unknown>>, frame: TextureSurfaceFrame): void | Promise<void>
   update?(props: Readonly<Record<string, unknown>>): void | Promise<void>
   resize?(width: number, height: number): void | Promise<void>
@@ -178,6 +221,8 @@ export interface TextureSurfaceApplicationDevices {
 export interface TextureWebSurfaceApp extends RegisteredWebSurfaceApp {
   readonly devices?: TextureSurfaceApplicationDevices
   readonly texture?: TextureSurfaceRegistrationOptions
+  /** Optional app/provider quality policy; physical canvas dimensions remain authoritative. */
+  readonly quality?: TextureSurfaceQualityOptions | TextureSurfaceQualityMode
   readonly accessibility?: TextureSurfaceAccessibilityDescriptor | ((props: Readonly<Record<string, unknown>>) => TextureSurfaceAccessibilityDescriptor)
   createTextureSurface(
     canvas: TextureSurfaceCanvas,
@@ -365,12 +410,23 @@ export interface TextureSurfaceInputController {
   readonly focusedPrimitiveId: string | null
 }
 
+export interface TextureSurfaceBrowserController {
+  /** True when the mounted surface exposes host-browser navigation controls. */
+  canControl(primitiveId: string): boolean
+  navigate(primitiveId: string, url: string): Promise<boolean>
+  back(primitiveId: string): Promise<boolean>
+  forward(primitiveId: string): Promise<boolean>
+  reload(primitiveId: string): Promise<boolean>
+}
+
 export interface TextureSurfaceInputOptions {
   /** Pointer listeners are installed only on the renderer canvas. Defaults to true. */
   readonly pointer?: boolean
+  /** Mouse/pointer buttons forwarded to Web Surfaces. Defaults to all buttons. Use [0] for normal primary-click web interaction while preserving host right-drag camera controls. */
+  readonly pointerButtons?: readonly number[]
   /** Automatically captures a pointer after a successful down event. Defaults to true. */
   readonly captureOnPointerDown?: boolean
-  /** Prevent browser scrolling when a surface consumes wheel input. Defaults to true. */
+  /** When a focused scroll-capable surface is under the pointer, prevent host/default wheel handling. Defaults to true. */
   readonly preventWheelDefault?: boolean
   /** Keyboard events are scoped to this target; defaults to the renderer canvas. */
   readonly keyboardTarget?: EventTarget
@@ -415,6 +471,70 @@ export interface TextureSurfaceThermalOptions {
   readonly intervalMs?: number
 }
 
+export interface TextureSurfaceBrowserPointerEvent {
+  readonly phase: TextureSurfacePointerPhase
+  readonly x: number
+  readonly y: number
+  readonly button: number
+  readonly buttons: number
+  readonly pointerId: number
+  readonly pointerType: TextureSurfacePointerType
+  readonly timestamp: number
+}
+
+export interface TextureSurfaceBrowserWheelEvent {
+  readonly x: number
+  readonly y: number
+  readonly deltaX: number
+  readonly deltaY: number
+  readonly deltaZ: number
+  readonly timestamp: number
+}
+
+export interface TextureSurfaceBrowserKeyboardEvent {
+  readonly phase: 'down' | 'up'
+  readonly key: string
+  readonly code: string
+  readonly repeat: boolean
+  readonly modifiers: Readonly<{ alt: boolean; ctrl: boolean; meta: boolean; shift: boolean }>
+  readonly timestamp: number
+}
+
+export interface TextureSurfaceNativeBrowserSurface {
+  navigate?(url: string): void | Promise<void>
+  back?(): void | Promise<void>
+  forward?(): void | Promise<void>
+  reload?(): void | Promise<void>
+  resize?(request: { readonly width: number; readonly height: number; readonly logicalWidth: number; readonly logicalHeight: number; readonly deviceScale: number }): void | Promise<void>
+  focus?(focused: boolean): void | Promise<void>
+  sendPointer?(event: TextureSurfaceBrowserPointerEvent): boolean | void
+  sendKeyboard?(event: TextureSurfaceBrowserKeyboardEvent): boolean | void
+  sendWheel?(event: TextureSurfaceBrowserWheelEvent): boolean | void
+  sendText?(text: string, inputType?: string): boolean | void
+  suspend?(): void | Promise<void>
+  resume?(): void | Promise<void>
+  dispose(): void | Promise<void>
+}
+
+export interface TextureSurfaceNativeBrowserProvider {
+  /** Host-controlled capability/trust gate. Backend details never enter world JSON. */
+  canPresent?(url: string): boolean
+  createSurface(request: {
+    /** Stable Anyo primitive identity so hosts can reuse/reclaim browser sessions across remounts. */
+    readonly primitiveId: string
+    readonly url: string
+    readonly canvas: TextureSurfaceCanvas
+    readonly width: number
+    readonly height: number
+    readonly logicalWidth: number
+    readonly logicalHeight: number
+    readonly deviceScale: number
+    readonly signal: AbortSignal
+    /** Provider calls this after producing a new framebuffer. */
+    readonly invalidate: () => void
+  }): TextureSurfaceNativeBrowserSurface | Promise<TextureSurfaceNativeBrowserSurface>
+}
+
 export interface TextureSurfacePerformanceOptions {
   readonly preset?: TextureSurfacePerformancePreset
   readonly maxSurfaces?: number
@@ -423,6 +543,8 @@ export interface TextureSurfacePerformanceOptions {
   readonly maxDiagnosticHistory?: number
   readonly minResolutionScale?: number
   readonly distanceTiers?: readonly TextureSurfaceDistanceTier[]
+  /** Distance dead-band in world units used when crossing resolution tiers. Defaults to 0.5. */
+  readonly resolutionHysteresis?: number
   readonly occlusion?: false | TextureSurfaceOcclusionOptions
   readonly pool?: false | TextureSurfacePoolOptions
   readonly thermal?: TextureSurfaceThermalOptions
@@ -481,6 +603,10 @@ export interface TextureWebSurfacePluginOptions {
   /** Explicit semantic companion UI. Defaults to browser DOM support when semantic data is provided. */
   readonly accessibility?: false | TextureSurfaceAccessibilityOptions
   readonly performance?: TextureSurfacePerformanceOptions
+  /** Host quality policy. Full-HD remains capped at a true 1920x1080 physical framebuffer. */
+  readonly quality?: TextureSurfaceQualityOptions | TextureSurfaceQualityMode
+  /** Optional host-supplied top-level browser context. No browser runtime is bundled by this package. */
+  readonly browserProvider?: false | TextureSurfaceNativeBrowserProvider
   readonly diagnostics?: (diagnostic: TextureSurfaceDiagnostic) => void
   /** DOM/iframe fallback routing is enabled by default. Set false when another host owns overlay presentation. */
   readonly domFallback?: false | Omit<WebSurfaceRuntimeOptions, 'registry' | 'shouldPresent'>
@@ -490,6 +616,8 @@ export interface TextureWebSurfacePluginOptions {
 export interface TextureWebSurfacePlugin extends WorldPlugin {
   readonly registry: WebSurfaceAppRegistry
   readonly input: TextureSurfaceInputController
+  /** Host browser controls for native/remote browser-backed physical surfaces. */
+  readonly browser: TextureSurfaceBrowserController
   readonly maintenance: TextureSurfaceMaintenanceController
   readonly capabilities: {
     readonly canvasApplications: true
@@ -517,6 +645,7 @@ export interface TextureWebSurfacePlugin extends WorldPlugin {
     readonly distanceScaling: true
     readonly texturePooling: boolean
     readonly occlusionSuspension: boolean
+    readonly nativeBrowserProvider: boolean
   }
 }
 
